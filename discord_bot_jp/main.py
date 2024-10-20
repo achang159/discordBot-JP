@@ -1,12 +1,13 @@
 import os
 
-from typing import Final, List
+from typing import Final, List, Tuple, Dict
 from dotenv import load_dotenv
 from discord import Intents, Client, Message
 from responses import get_response
 from azure.ai.translation.text import TextTranslationClient
 from azure.core.credentials import AzureKeyCredential
-from azure.ai.translation.text.models import TranslatedTextItem, TranslationText
+from azure.ai.translation.text.models import TranslatedTextItem, TranslationLanguage
+from azure.core.exceptions import HttpResponseError
 
 # Load our environment vars from somewhere safe
 load_dotenv()
@@ -15,12 +16,60 @@ AZURE_TEXT_TRANSLATION_API_KEY: Final[str] = os.getenv('AZURE_API_KEY')
 AZURE_TEXT_TRANSLATOR_REGION: Final[str] = os.getenv('AZURE_REGION')
 AZURE_TEXT_TRANSLATION_ENDPOINT : Final[str] = os.getenv('AZURE_ENDPOINT')
 
-def create_text_translation_client_with_credential():
+def create_text_translation_client_with_credential() -> TextTranslationClient:
     # [START create_text_translation_client_with_credential]
     credential = AzureKeyCredential(AZURE_TEXT_TRANSLATION_API_KEY)
     text_translator = TextTranslationClient(credential=credential, region=AZURE_TEXT_TRANSLATOR_REGION)
     # [END create_text_translation_client_with_credential]
     return text_translator
+
+def get_supported_languages() -> Tuple[List[str], dict[str, TranslationLanguage]]:
+    try:
+        response = text_translator.get_supported_languages()
+        supported_languages: List[str] = []
+        supported_lang_tooltip: List[str] = []
+        if response.translation is not None:
+            #print("Translation Languages:")
+            for key, value in response.translation.items():
+                supported_languages.append(key)
+                supported_lang_tooltip.append(f"{key}:\t{value.name}")
+
+        # if response.transliteration is not None:
+        #     print("Transliteration Languages:")
+        #     for key, value in response.transliteration.items():
+        #         print(f"{key} -- name: {value.name}, supported script count: {len(value.scripts)}")
+
+        # if response.dictionary is not None:
+        #     print("Dictionary Languages:")
+        #     for key, value in response.dictionary.items():
+        #         print(f"{key} -- name: {value.name}, supported target languages count: {len(value.translations)}")
+        return supported_languages, supported_lang_tooltip
+    
+    except HttpResponseError as exception:
+        if exception.error is not None:
+            print(f"Error Code: {exception.error.code}")
+            print(f"Message: {exception.error.message}")
+        raise
+
+async def print_supported_languages_tooltip(message: Message) -> None:
+    if len(_supported_lang_tooltip) <= 0:
+        await message.channel.send(f"ERROR: {_supported_lang_tooltip} has not been set.")
+    else:
+        await message.channel.send("Translation Languages:")
+        await message.channel.send('\n'.join(_supported_lang_tooltip))
+
+async def set_to_language(message: Message, to_language: str,) -> None:
+    if to_language not in _supported_languages:
+        await message.channel.send(f"Error: {to_language} not supported")
+    else:
+        await message.channel.send(f"Set translation language to {to_language}!")
+        _to_language = to_language
+
+# Globals (eventually add these into Client class)
+_to_language: str = ""
+_supported_languages: List[str] = []
+_supported_lang_tooltip: List[str] = []
+#Add dict to print name in tooltip
 
 # Setup the bot
 # Intents are the permissions that the bots need to see/respond to messages
@@ -30,6 +79,7 @@ client: Client = Client(intents=intents)
 
 # Setup Azure text translator client
 text_translator: TextTranslationClient = create_text_translation_client_with_credential()
+_supported_languages, _supported_lang_tooltip = get_supported_languages()
 
 # Handling the startup for our bot
 @client.event
@@ -49,7 +99,7 @@ async def on_message(message: Message) -> None:
 
     if message.content.startswith('!translate'):
         text_to_translate: str = message.content[len('!translate '):]
-        translated_text: List[TranslatedTextItem] = await translate_text_to_japanese(text_to_translate)
+        translated_text: List[TranslatedTextItem] = await translate_text(text_to_translate)
         
         if translated_text:
             for language in translated_text:
@@ -57,32 +107,50 @@ async def on_message(message: Message) -> None:
                     await message.channel.send(translation.text)
         else:
             await message.channel.send('Error: Could not translate text.')
+    
+    elif message.content.startswith('!get_lang'):
+        await print_supported_languages_tooltip(message)
+
+    elif message.content.startswith('!set_lang'):
+        if len(message.content) <= len('!set_lang '):
+            await message.channel.send(f"ERROR: No language specified")
+            await print_supported_languages_tooltip(message)
+        else:
+            to_language: str = message.content[len('!set_lang '):]
+            await set_to_language(message, to_language)
+    
     else:
         await send_message(message, user_message)
 
 # Translation functionality
-async def translate_text_to_japanese(text_to_translate: str) -> List[TranslatedTextItem]:
+async def translate_text(text_to_translate: str) -> List[TranslatedTextItem]:
     try:
-        from_language = "en"
-        to_language = ["ja"]
+        print(f"{_to_language}")
+
+        if _to_language == "":
+            print(f"ERROR: {_to_language} is not a supported language. Try setting a language using !set_lang command.")
+            return None
+        
         # Prep body for API request
         body = [{
             'text': text_to_translate
         }]
         
         response: List[TranslatedTextItem] = text_translator.translate(
-            body=body, to_language=to_language, from_language=from_language
+            body=body, to_language=_to_language
         )
 
-        # TODO: Test string to avoid calling API multiple times
-        # translations: TranslationText = "こんにちは、元気ですか。"
-        # response: TranslatedTextItem = TranslatedTextItem(translations=[translations])
+        # TODO: Add test string to avoid calling API multiple times
+        # text: TranslationText = "こんにちは、元気ですか。"
+        # translation = TranslatedTextItem(translations=[text])
+        # response: List[TranslatedTextItem]
 
         return response if response else None
         
-    except Exception as exception:
+    except HttpResponseError as exception:
         if exception.error is not None:
-            print(f"Exception: {exception}")
+            print(f"Error Code: {exception.error.code}")
+            print(f"Message: {exception.error.message}")
         raise
 
 # Message functionality
